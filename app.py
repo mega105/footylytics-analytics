@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from analytics import prepare_data, monthly_summary, lead_matches, lead_summary
 
 px.defaults.template = "plotly_dark"
 
@@ -142,60 +143,7 @@ st.markdown("""
 
 @st.cache_data
 def load_data():
-
-    df = pd.read_csv(DATA_PATH)
-
-    required_columns = [
-        "Date", "HomeTeam", "AwayTeam",
-        "FTHG", "FTAG"
-    ]
-
-    missing = [
-        col for col in required_columns
-        if col not in df.columns
-    ]
-
-    if missing:
-        raise ValueError(
-            f"Missing columns: {missing}"
-        )
-
-    df = df.dropna(
-        subset=["HomeTeam", "AwayTeam", "FTHG", "FTAG"]
-    ).copy()
-
-    df["Date"] = pd.to_datetime(
-        df["Date"],
-        dayfirst=True,
-        errors="coerce"
-    )
-
-    df["FTHG"] = pd.to_numeric(
-        df["FTHG"], errors="coerce"
-    )
-
-    df["FTAG"] = pd.to_numeric(
-        df["FTAG"], errors="coerce"
-    )
-
-    df = df.dropna(
-        subset=["FTHG", "FTAG"]
-    )
-
-    df["FTHG"] = df["FTHG"].astype(int)
-    df["FTAG"] = df["FTAG"].astype(int)
-
-    # Calculate match results
-    df["FTR"] = df.apply(
-        lambda x:
-        "H" if x["FTHG"] > x["FTAG"]
-        else "A" if x["FTHG"] < x["FTAG"]
-        else "D",
-        axis=1
-    )
-
-    return df.sort_values("Date")
-
+    return prepare_data(pd.read_csv(DATA_PATH))
 
 # ==========================================
 # LEAGUE TABLE CALCULATION
@@ -282,7 +230,7 @@ st.markdown("""
 <div class="hero">
     <div class="hero-kicker">English Premier League &nbsp;·&nbsp; 2024/25</div>
     <div class="hero-title">Footylytics <span aria-hidden="true">⚽</span></div>
-    <p class="hero-copy">The story behind every goal, point, and team performance throughout the season.</p>
+    <p class="hero-copy">Turn match results into a focused review of how teams protect their advantage.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -305,7 +253,10 @@ if not DATA_PATH.exists():
 
 try:
 
-    df = load_data()
+    df, rejected, issues, quality = load_data()
+    if df.empty:
+        st.error("No valid matches remain after validation. Check the source CSV.")
+        st.stop()
     standings = calculate_standings(df)
 
 except Exception as error:
@@ -349,6 +300,127 @@ with st.sidebar:
     )
 
 
+
+# ==========================================
+# LEAD PROTECTION: RETROSPECTIVE DIAGNOSTICS
+# ==========================================
+st.header("Lead Protection")
+st.caption("From a half-time lead to a full-time result · EPL 2024/25")
+st.write("Identify matches to review when a half-time advantage did not become a win.")
+f1, f2 = st.columns(2)
+with f1:
+    margin = st.selectbox("Half-time advantage", ["All margins", "One goal", "Two or more goals"])
+with f2:
+    venue = st.selectbox("Match venue", ["All venues", "Home", "Away"])
+
+leads = lead_matches(df)
+if margin == "One goal":
+    leads = leads[leads["Lead margin"] == 1]
+elif margin == "Two or more goals":
+    leads = leads[leads["Lead margin"] >= 2]
+if venue != "All venues":
+    leads = leads[leads.Venue == venue]
+summary = lead_summary(leads)
+scope = selected_team if selected_team != "All Teams" else "League"
+selected_leads = leads if selected_team == "All Teams" else leads[leads.Team == selected_team]
+n_leads = len(selected_leads)
+n_wins = int(selected_leads.Outcome.eq("Win").sum())
+c1, c2, c3 = st.columns(3)
+c1.metric(f"{scope}: half-time leads", n_leads)
+c2.metric("Converted to wins", f"{n_wins / n_leads:.1%}" if n_leads else "Unavailable")
+c3.metric("Points missed after half-time leads", int(selected_leads["Points not secured"].sum()))
+st.caption("Points missed after half-time leads: 2 for each draw and 3 for each defeat after leading at half-time. These points were not earned; they are not points guaranteed to be recoverable.")
+
+if n_leads:
+    n_draws = int(selected_leads.Outcome.eq("Draw").sum())
+    n_losses = int(selected_leads.Outcome.eq("Loss").sum())
+    context = f"{margin.lower()} · {venue.lower()}"
+    st.info(
+        f"**{scope} — {context}:** {n_wins} of {n_leads} half-time leads "
+        f"became wins ({n_wins/n_leads:.1%}). "
+        f"The remaining {n_draws + n_losses} ended in {n_draws} draws and {n_losses} defeats. "
+        + ("Use Match evidence below to prioritize those matches for review."
+           if n_draws + n_losses else "Every eligible lead became a win in this selection.")
+    )
+else:
+    st.info(f"{scope} has no half-time leads under these filters; no win rate can be calculated.")
+
+if summary.empty:
+    st.info("No eligible matches match these filters.")
+else:
+    chart = summary.sort_values("Win rate").copy()
+    chart["Upper error"] = chart["CI high"] - chart["Win rate"]
+    chart["Lower error"] = chart["Win rate"] - chart["CI low"]
+    has_selection = selected_team != "All Teams"
+    chart["Focus"] = chart["Team"].eq(selected_team).map({True: "Selected team", False: "Other teams"}) if has_selection else "All teams"
+    lead_fig = px.scatter(chart, x="Win rate", y="Team", size="Leads", size_max=19,
+        error_x="Upper error", error_x_minus="Lower error", color="Focus",
+        color_discrete_map={"Selected team": "#61e294", "Other teams": "#82968d", "All teams": "#61e294"},
+        hover_data={"Leads": True, "Wins": True, "Draws": True, "Losses": True,
+                    "Win rate": ":.1%", "Upper error": False, "Lower error": False, "Focus": False},
+        title="How often does a half-time lead become a win?")
+    for trace in lead_fig.data:
+        focused = trace.name != "Other teams"
+        trace.update(opacity=1 if focused else 0.38,
+                     error_x=dict(thickness=2 if focused else 1, width=4),
+                     marker=dict(line=dict(width=1, color="#d9f7e3")))
+    league_rate = leads.Outcome.eq("Win").mean()
+    lead_fig.add_vline(x=league_rate, line_dash="dot", line_color="#e9bd67")
+    lead_fig.update_layout(height=max(440, len(chart)*38 + 150),
+        margin=dict(l=160, r=35, t=75, b=70), showlegend=False,
+        xaxis_title="Win rate after a half-time lead", yaxis_title="")
+    lead_fig.update_yaxes(type="category", categoryorder="array", categoryarray=chart["Team"].tolist(),
+        tickmode="array", tickvals=chart["Team"].tolist(), ticktext=chart["Team"].tolist(),
+        automargin=True, tickfont=dict(size=13))
+    lead_fig.update_xaxes(tickformat=".0%", range=[0, 1], tickmode="linear", tick0=0, dtick=0.1)
+    st.plotly_chart(lead_fig, width="stretch")
+    st.caption(f"Dotted line: pooled league rate for these filters ({league_rate:.1%}, {len(leads)} matches). Larger dots represent more matches. Horizontal lines show approximate 95% Wilson intervals; longer lines mean greater uncertainty. The selected team is highlighted in green.")
+    if selected_team != "All Teams" and 0 < n_leads < 10:
+        st.warning("Fewer than 10 eligible matches. Treat this comparison as exploratory.")
+    elif selected_team == "All Teams":
+        st.caption("Select a team in the sidebar to highlight it and inspect its match evidence.")
+
+st.subheader("Match evidence")
+only_dropped = st.checkbox("Only show leads that did not become wins", value=True)
+evidence = selected_leads.copy()
+if only_dropped:
+    evidence = evidence[evidence.Outcome.ne("Win")]
+if evidence.empty:
+    st.info("No matches to show for this selection.")
+else:
+    evidence["Half-time"] = evidence["HT for"].astype(int).astype(str) + "–" + evidence["HT against"].astype(int).astype(str)
+    evidence["Full-time"] = evidence["FT for"].astype(int).astype(str) + "–" + evidence["FT against"].astype(int).astype(str)
+    evidence = evidence[["Date", "Team", "Opponent", "Venue", "Half-time", "Full-time", "Outcome", "Points not secured"]].sort_values("Date")
+    evidence = evidence.rename(columns={"Points not secured": "Points missed after half-time leads"})
+    st.dataframe(evidence, hide_index=True, width="stretch")
+    st.download_button("Download selected match evidence", evidence.to_csv(index=False).encode(),
+                       "lead_protection_evidence.csv", "text/csv")
+st.caption("Scores are shown from the selected team's perspective.")
+with st.expander("Methodology and limitations"):
+    st.markdown("""
+- Includes only matches with valid half-time and final scores.
+- A win conversion is a full-time win after leading at half-time.
+- Filters compare lead margin and venue. They do not adjust for opponent strength.
+- Intervals use the 95% Wilson method as an approximate description of uncertainty. Repeated opponents and matches are not fully independent.
+- Different teams face different match contexts. These comparisons do not establish coaching quality or causation.
+- This dataset has no goal timings, substitutions, player positions or xG. It cannot identify why a lead was lost, or every lead taken during a match.
+- Match evidence prioritizes further video review. It does not prescribe a tactical change or promise additional points.
+- All results are retrospective; no predictive model is claimed.
+""")
+with st.expander("Data quality and provenance"):
+    st.dataframe(pd.DataFrame([quality]), hide_index=True, width="stretch")
+    st.markdown("[Dataset: Football-Data EPL 2024/25](https://www.football-data.co.uk/mmz4281/2425/E0.csv) · [Column definitions](https://www.football-data.co.uk/notes.txt)")
+    st.write("Original CSV is retained. Invalid core records and ambiguous duplicates are quarantined. Missing odds do not exclude otherwise valid matches. Invalid optional statistics become unavailable and are logged.")
+    if not rejected.empty:
+        st.dataframe(rejected[["Source row", "Reason"]], hide_index=True)
+    if not issues.empty:
+        st.dataframe(issues, hide_index=True)
+    missing_stats = df[["HTHG", "HTAG", "HS", "AS", "HST", "AST"]].isna().sum()
+    st.dataframe(missing_stats.rename("Unavailable values").rename_axis("Column").reset_index(), hide_index=True)
+    st.download_button("Download validated match data", df.to_csv(index=False).encode(),
+                       "epl_2024_25_validated.csv", "text/csv")
+st.divider()
+
 # ==========================================
 # LEAGUE OVERVIEW
 # ==========================================
@@ -391,12 +463,7 @@ col6.metric("Away wins", f"{away_wins}", f"{away_wins / total_matches:.0%}")
 st.subheader("The season at a glance")
 trend_col, result_col = st.columns([1.55, 1])
 
-monthly = (
-    df.assign(Month=df["Date"].dt.to_period("M").dt.to_timestamp())
-    .groupby("Month", as_index=False)
-    .agg(Goals=("FTHG", "sum"), Matches=("FTHG", "size"))
-)
-monthly["Goals per match"] = monthly["Goals"] / monthly["Matches"]
+monthly = monthly_summary(df)
 
 with trend_col:
     trend_fig = px.area(
@@ -415,7 +482,7 @@ with trend_col:
     trend_fig.update_layout(height=340, yaxis_title="Goals", xaxis_title="")
     st.plotly_chart(
         trend_fig,
-        use_container_width=True,
+        width="stretch",
         config={"displayModeBar": False}
     )
 
@@ -449,7 +516,7 @@ with result_col:
     )
     st.plotly_chart(
         result_fig,
-        use_container_width=True,
+        width="stretch",
         config={"displayModeBar": False}
     )
 
@@ -490,7 +557,7 @@ table = table.rename(columns={
 st.dataframe(
     table,
     hide_index=True,
-    use_container_width=True,
+    width="stretch",
     height=590
 )
 
@@ -539,7 +606,7 @@ fig.update_yaxes(categoryorder="total ascending")
 
 st.plotly_chart(
     fig,
-    use_container_width=True,
+    width="stretch",
     config={"displayModeBar": False}
 )
 
@@ -566,7 +633,7 @@ scatter_fig.update_layout(
 )
 st.plotly_chart(
     scatter_fig,
-    use_container_width=True,
+    width="stretch",
     config={"displayModeBar": False}
 )
 
@@ -696,7 +763,7 @@ else:
         form_fig.update_layout(height=390, xaxis_title="", yaxis_title="Goals")
         st.plotly_chart(
             form_fig,
-            use_container_width=True,
+            width="stretch",
             config={"displayModeBar": False}
         )
 
@@ -730,7 +797,7 @@ else:
         )
         st.plotly_chart(
             team_result_fig,
-            use_container_width=True,
+            width="stretch",
             config={"displayModeBar": False}
         )
 
@@ -772,7 +839,7 @@ else:
     )
     st.plotly_chart(
         fig2,
-        use_container_width=True,
+        width="stretch",
         config={"displayModeBar": False}
     )
 
@@ -826,7 +893,7 @@ comparison = standings[
 st.dataframe(
     comparison,
     hide_index=True,
-    use_container_width=True
+    width="stretch"
 )
 
 comparison_metrics = standings[
@@ -861,7 +928,7 @@ comparison_fig.update_layout(
 )
 st.plotly_chart(
     comparison_fig,
-    use_container_width=True,
+    width="stretch",
     config={"displayModeBar": False}
 )
 
