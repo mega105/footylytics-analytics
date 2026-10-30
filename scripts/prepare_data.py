@@ -1,88 +1,19 @@
-
+"""Run from any working directory: python scripts/prepare_data.py."""
 from pathlib import Path
-import pandas as pd
-
+import sys
+import json
 ROOT = Path(__file__).resolve().parents[1]
-
-SOURCE = ROOT / "data" / "E0.csv"
-
-OUTPUT = ROOT / "data" / "epl_2024_25_clean.csv"
-
+sys.path.insert(0, str(ROOT))
+import pandas as pd
+from analytics import prepare_data
 
 def main():
-
-    if not SOURCE.exists():
-
-        raise FileNotFoundError(
-            "E0.csv not found in data folder."
-        )
-
-    df = pd.read_csv(SOURCE)
-
-    required = [
-        "Date",
-        "HomeTeam",
-        "AwayTeam",
-        "FTHG",
-        "FTAG"
-    ]
-
-    for column in required:
-
-        if column not in df.columns:
-
-            raise ValueError(
-                f"Missing column: {column}"
-            )
-
-    df = df.dropna(
-        subset=required
-    ).copy()
-
-    df["Date"] = pd.to_datetime(
-        df["Date"],
-        dayfirst=True,
-        errors="coerce"
-    )
-
-    df["FTHG"] = pd.to_numeric(
-        df["FTHG"],
-        errors="coerce"
-    )
-
-    df["FTAG"] = pd.to_numeric(
-        df["FTAG"],
-        errors="coerce"
-    )
-
-    df = df.dropna(
-        subset=["Date", "FTHG", "FTAG"]
-    )
-
-    df["FTHG"] = df["FTHG"].astype(int)
-    df["FTAG"] = df["FTAG"].astype(int)
-
-    df["FTR"] = df.apply(
-        lambda x:
-        "H" if x["FTHG"] > x["FTAG"]
-        else "A" if x["FTHG"] < x["FTAG"]
-        else "D",
-        axis=1
-    )
-
-    df = df.sort_values("Date")
-
-    df.to_csv(
-        OUTPUT,
-        index=False
-    )
-
-    print("Data cleaning completed!")
-    print(f"Total matches: {len(df)}")
-    print(f"Total teams: {len(set(df['HomeTeam']) | set(df['AwayTeam']))}")
-    print(f"Saved to: {OUTPUT}")
-
+    clean, rejected, issues, report = prepare_data(pd.read_csv(ROOT / "data" / "E0.csv"))
+    clean.to_csv(ROOT / "data" / "epl_2024_25_clean.csv", index=False)
+    rejected.to_csv(ROOT / "data" / "quarantined_matches.csv", index=False)
+    issues.to_csv(ROOT / "data" / "validation_issues.csv", index=False)
+    (ROOT / "data" / "quality_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps(report, indent=2))
 
 if __name__ == "__main__":
-
     main()
