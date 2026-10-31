@@ -21,7 +21,21 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-DATA_PATH   = Path(__file__).parent / "data"   / "E0.csv"
+DATA_DIR = Path(__file__).parent / "data"
+
+# Otomatis prioritaskan data bersih, fallback ke E0.csv jika belum ada
+def get_data_path() -> Path:
+    candidates = [
+        DATA_DIR / "EPL_2024_25_clean.csv",
+        DATA_DIR / "epl_2024_25_clean.csv",
+        DATA_DIR / "E0.csv"
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[0]
+
+DATA_PATH = get_data_path()
 STATIC_PATH = Path(__file__).parent / "static" / "Football Ball and Boot on the Touchline.png"
 
 
