@@ -22,7 +22,7 @@ DATA_PATH = Path(__file__).parent / "data" / "E0.csv"
 
 
 # ==========================================
-# CUSTOM STYLE
+# CUSTOM aSTYLE
 # ==========================================
 
 st.markdown("""
